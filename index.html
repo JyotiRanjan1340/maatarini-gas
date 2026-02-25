@@ -746,7 +746,7 @@ async function loadSharedDataFromSheet(){
       if(json.orders && json.orders.length){
         const headerRow = json.orderHeaders || null;
 
-        // Skip ANY row that looks like a header — check both col[0] and col[2]
+        // Skip ANY row that looks like a header
         const skipIds   = ['order no.','order no','orderid','id','order','#'];
         const skipNames = ['client name','clientname','name','client','customer name'];
         const rawOrders = json.orders.filter(row => {
@@ -757,34 +757,72 @@ async function loadSharedDataFromSheet(){
           if(skipNames.includes(nameCell))  return false;
           return true;
         });
-        orders = rawOrders.map(row => normalizeSheetOrder(row, headerRow))
-                          .filter(o => o.id && o.name &&
-                                       String(o.id).trim() !== '' &&
-                                       !skipIds.includes(String(o.id).toLowerCase().trim()) &&
-                                       !skipNames.includes(String(o.name).toLowerCase().trim()));
+
+        const sheetOrders = rawOrders
+          .map(row => normalizeSheetOrder(row, headerRow))
+          .filter(o => o.id && o.name &&
+                       String(o.id).trim() !== '' &&
+                       !skipIds.includes(String(o.id).toLowerCase().trim()) &&
+                       !skipNames.includes(String(o.name).toLowerCase().trim()));
+
+        // *** KEY FIX: Merge with local orders ***
+        // Local unsynced changes (status, payment) take priority over sheet data
+        // This prevents refresh from overwriting locally-marked Delivered orders
+        const localMap = {};
+        orders.forEach(o => { localMap[String(o.id).trim()] = o; });
+
+        orders = sheetOrders.map(sheetOrder => {
+          const localId = String(sheetOrder.id).trim();
+          const local = localMap[localId];
+          if(local && !local.synced) {
+            // Local has unsynced changes — keep local version, retry sync
+            return local;
+          }
+          if(local && local.synced) {
+            // Both exist and local is synced — use sheet data (source of truth)
+            // BUT preserve local status if it's "more final" (Delivered > Pending)
+            const statusPriority = {Delivered:3, Cancelled:2, Pending:1};
+            const localPri  = statusPriority[local.status]  || 1;
+            const sheetPri  = statusPriority[sheetOrder.status] || 1;
+            if(localPri > sheetPri) {
+              // Local has a more final status — keep it and force re-sync
+              sheetOrder.status = local.status;
+              sheetOrder.synced = false;
+            }
+          }
+          return sheetOrder;
+        });
+
+        // Retry sync for any still-unsynced orders
+        const unsynced = orders.filter(o => !o.synced);
+        if(unsynced.length > 0){
+          setTimeout(()=>{
+            unsynced.forEach(o => syncStatus(o));
+          }, 2000);
+        }
+
         localStorage.setItem('mtg_orders', JSON.stringify(orders));
       }
 
       // ---- Load Clients ----
-      // Priority 1: Clients sheet (if it has data)
       if(json.clients && json.clients.length){
-        // Skip header row — if first row col[1] is "Name" or "Client Name" it's a header
         const rawClients = json.clients.filter(row => {
           const nameCell = String(row[1]||'').trim().toLowerCase();
           return nameCell && nameCell !== 'name' && nameCell !== 'client name' && nameCell !== 'clientname';
         });
         const sheetClients = rawClients.map(normalizeSheetClient).filter(c=>c.name&&c.name.trim()!=='');
-        // Merge with clients extracted from orders (add any missing)
         clients = mergeClientsWithOrders(sheetClients, orders);
       } else {
-        // Priority 2: No Clients sheet yet — extract ALL unique clients from past orders
         clients = extractClientsFromOrders(orders);
-        // Auto-sync these extracted clients back to sheet so they're saved for next time
         if(clients.length > 0) syncClientsToSheet();
       }
 
       localStorage.setItem('mtg_clients', JSON.stringify(clients));
-      showSyncBar(`☁️ ${orders.length} orders · ${clients.length} clients loaded`,'sync-ok');
+      const unsyncedCount = orders.filter(o=>!o.synced).length;
+      const msg = unsyncedCount > 0
+        ? `☁️ ${orders.length} orders loaded · ${unsyncedCount} pending sync`
+        : `☁️ ${orders.length} orders · ${clients.length} clients loaded`;
+      showSyncBar(msg, unsyncedCount > 0 ? 'sync-pending' : 'sync-ok');
     }
   } catch(e){
     showSyncBar('📱 Offline — showing local data','sync-pending');
