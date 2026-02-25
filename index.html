@@ -1012,33 +1012,58 @@ function updateDashboard(){
   const el=document.getElementById('recent-list');
   el.innerHTML=recent.length?recent.map(orderCardHTML).join(''):emptyState('📭','No orders yet','Tap + to add your first order');
 
-  // Draw charts after a tick so canvas is visible
-  setTimeout(()=>{
-    drawStatusChart(del, pend, cancelled);
-    drawCylChart();
-    drawRevenueChart();
-  }, 50);
+  // Redraw charts with longer delay to ensure canvas has layout width
+  setTimeout(()=>{ drawAllCharts(del,pend,cancelled); }, 200);
 }
 
-// ---- Donut chart helper ----
+function drawAllCharts(del,pend,cancelled){
+  drawStatusChart(del,pend,cancelled);
+  drawCylChart();
+  drawRevenueChart();
+}
+
+// ---- Safe rect: fallback for browsers without roundRect ----
+function safeRect(ctx, x, y, w, h, r){
+  if(w<=0||h<=0) return;
+  r=Math.min(r, w/2, h/2);
+  if(ctx.roundRect){
+    ctx.beginPath(); ctx.roundRect(x,y,w,h,r); ctx.fill();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+    ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+    ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+    ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+    ctx.closePath(); ctx.fill();
+  }
+}
+
+// ---- Donut chart ----
 function drawDonut(canvasId, segments, legendId){
   const canvas=document.getElementById(canvasId);
   if(!canvas) return;
+  // Force fixed size — never rely on offsetWidth (it can be 0)
+  const SIZE=140;
+  canvas.width=SIZE; canvas.height=SIZE;
+  canvas.style.width=SIZE+'px'; canvas.style.height=SIZE+'px';
   const ctx=canvas.getContext('2d');
-  const W=canvas.width=canvas.offsetWidth||140;
-  const H=canvas.height=140;
-  const cx=W/2, cy=H/2, r=Math.min(cx,cy)-10, ir=r*0.55;
-  ctx.clearRect(0,0,W,H);
+  const cx=SIZE/2, cy=SIZE/2, r=58, ir=35;
+  ctx.clearRect(0,0,SIZE,SIZE);
+
   const total=segments.reduce((s,x)=>s+x.val,0);
   if(!total){
-    ctx.fillStyle='#EEE';
+    ctx.fillStyle='#EEEEEE';
     ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
-    ctx.fillStyle='#FFF';
+    ctx.fillStyle='#FFFFFF';
     ctx.beginPath();ctx.arc(cx,cy,ir,0,Math.PI*2);ctx.fill();
+    const leg=document.getElementById(legendId);
+    if(leg) leg.innerHTML='<span style="color:#aaa;font-size:11px">No data yet</span>';
     return;
   }
   let start=-Math.PI/2;
   segments.forEach(seg=>{
+    if(seg.val<=0) return;
     const sweep=(seg.val/total)*Math.PI*2;
     ctx.beginPath();
     ctx.moveTo(cx,cy);
@@ -1048,21 +1073,22 @@ function drawDonut(canvasId, segments, legendId){
     ctx.fill();
     start+=sweep;
   });
-  // Hole
+  // White hole
   ctx.beginPath();ctx.arc(cx,cy,ir,0,Math.PI*2);
-  ctx.fillStyle='#fff';ctx.fill();
-  // Center text
+  ctx.fillStyle='#FFFFFF';ctx.fill();
+  // Center number
   ctx.fillStyle='#0D47A1';
-  ctx.font=`bold ${Math.round(ir*0.55)}px Poppins,sans-serif`;
+  ctx.font='bold 22px Arial,sans-serif';
   ctx.textAlign='center';ctx.textBaseline='middle';
   ctx.fillText(total,cx,cy);
+
   // Legend
   const leg=document.getElementById(legendId);
   if(leg) leg.innerHTML=segments.map(s=>
     `<div style="display:flex;align-items:center;gap:5px">
-       <span style="width:10px;height:10px;border-radius:50%;background:${s.color};flex-shrink:0;display:inline-block"></span>
-       <span style="color:#555">${s.label}: <b>${s.val}</b></span>
-     </div>`).join('');
+      <span style="width:9px;height:9px;border-radius:50%;background:${s.color};display:inline-block;flex-shrink:0"></span>
+      <span style="color:#555;font-size:11px">${s.label}: <b>${s.val}</b></span>
+    </div>`).join('');
 }
 
 function drawStatusChart(del,pend,cancelled){
@@ -1075,101 +1101,141 @@ function drawStatusChart(del,pend,cancelled){
 
 function drawCylChart(){
   const counts={};
-  orders.forEach(o=>{ const t=o.cylType||'Unknown'; counts[t]=(counts[t]||0)+1; });
-  const colors=['#1565C0','#FFD600','#43A047','#E53935','#7B1FA2','#00838F'];
+  orders.forEach(o=>{
+    const t=(o.cylType||'Unknown').trim()||'Unknown';
+    counts[t]=(counts[t]||0)+1;
+  });
+  const colors=['#1565C0','#FFB300','#43A047','#E53935','#7B1FA2','#00838F','#F57C00'];
   const segs=Object.keys(counts).map((k,i)=>({label:k,val:counts[k],color:colors[i%colors.length]}));
-  drawDonut('chart-cyl', segs.length?segs:[{label:'No data',val:1,color:'#EEE'}], 'chart-cyl-legend');
+  drawDonut('chart-cyl', segs.length?segs:[{label:'No data',val:0,color:'#EEE'}], 'chart-cyl-legend');
 }
 
+// ---- Bar chart for last 7 days ----
 function drawRevenueChart(){
   const canvas=document.getElementById('chart-revenue');
   if(!canvas) return;
+
+  // Fixed width based on screen, not offsetWidth
+  const W=Math.min(window.innerWidth-48, 600);
+  const H=160;
+  canvas.width=W; canvas.height=H;
+  canvas.style.width='100%'; canvas.style.maxWidth=W+'px';
+
   const ctx=canvas.getContext('2d');
-  const W=canvas.width=canvas.offsetWidth||300;
-  const H=canvas.height=160;
   ctx.clearRect(0,0,W,H);
 
-  // Build last 7 days
+  // Last 7 days
   const days=[];
   for(let i=6;i>=0;i--){
     const d=new Date(); d.setDate(d.getDate()-i);
+    const iso=d.toISOString().split('T')[0]; // YYYY-MM-DD
     days.push({
       label:d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}),
-      date:d.toISOString().split('T')[0],
-      orders:0, revenue:0
+      iso, orders:0, revenue:0
     });
   }
+
   orders.forEach(o=>{
-    const d=(o.indentDate||o.timestamp||'').slice(0,10);
-    const day=days.find(x=>x.date===d);
+    // Try multiple date fields and formats
+    let raw=(o.indentDate||o.date||o.timestamp||'').toString().trim();
+    let iso='';
+    if(/^\d{4}-\d{2}-\d{2}/.test(raw)){
+      iso=raw.slice(0,10);
+    } else if(/^\d{2}\/\d{2}\/\d{4}/.test(raw)){
+      const [d,m,y]=raw.split('/'); iso=`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+    } else if(raw){
+      try{ const dt=new Date(raw); if(!isNaN(dt)) iso=dt.toISOString().split('T')[0]; }catch(e){}
+    }
+    const day=days.find(x=>x.iso===iso);
     if(day){ day.orders++; day.revenue+=(o.total||0); }
   });
 
   const maxRev=Math.max(...days.map(d=>d.revenue),1);
   const maxOrd=Math.max(...days.map(d=>d.orders),1);
-  const pad={l:40,r:10,t:10,b:36};
-  const chartW=W-pad.l-pad.r;
-  const chartH=H-pad.t-pad.b;
-  const barW=Math.floor(chartW/days.length*0.35);
-  const gap=chartW/days.length;
+  const pad={l:44,r:12,t:12,b:38};
+  const cW=W-pad.l-pad.r;
+  const cH=H-pad.t-pad.b;
+  const slot=cW/7;
+  const bw=Math.max(Math.floor(slot*0.28),4);
 
-  // Grid lines
-  ctx.strokeStyle='#F0F0F0'; ctx.lineWidth=1;
+  // Background
+  ctx.fillStyle='#FAFAFA';
+  ctx.fillRect(0,0,W,H);
+
+  // Grid lines + Y labels
+  ctx.strokeStyle='#EEEEEE'; ctx.lineWidth=1;
+  ctx.fillStyle='#AAAAAA'; ctx.font='10px Arial,sans-serif'; ctx.textAlign='right';
   for(let i=0;i<=4;i++){
-    const y=pad.t+chartH-(chartH/4*i);
+    const y=pad.t+cH-Math.round(cH/4*i);
     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+    const val=Math.round(maxRev/4*i);
+    ctx.fillText(val>=1000?Math.round(val/1000)+'k':'₹'+val, pad.l-4, y+4);
   }
 
+  // Bars
   days.forEach((d,i)=>{
-    const x=pad.l+gap*i+gap/2;
+    const cx=pad.l+slot*i+slot/2;
+
     // Revenue bar (blue)
-    const revH=Math.round((d.revenue/maxRev)*chartH);
-    if(revH>0){
-      ctx.fillStyle='rgba(21,101,192,0.85)';
-      ctx.beginPath();
-      ctx.roundRect(x-barW-2,pad.t+chartH-revH,barW,revH,3);
-      ctx.fill();
+    const rh=Math.max(Math.round((d.revenue/maxRev)*cH),d.revenue>0?2:0);
+    if(rh>0){
+      ctx.fillStyle='#1565C0';
+      safeRect(ctx, cx-bw-1, pad.t+cH-rh, bw, rh, 3);
     }
-    // Orders bar (yellow)
-    const ordH=Math.round((d.orders/maxOrd)*chartH);
-    if(ordH>0){
-      ctx.fillStyle='rgba(255,214,0,0.9)';
-      ctx.beginPath();
-      ctx.roundRect(x+2,pad.t+chartH-ordH,barW,ordH,3);
-      ctx.fill();
+
+    // Orders bar (amber)
+    const oh=Math.max(Math.round((d.orders/maxOrd)*cH),d.orders>0?2:0);
+    if(oh>0){
+      ctx.fillStyle='#FFB300';
+      safeRect(ctx, cx+1, pad.t+cH-oh, bw, oh, 3);
     }
+
     // X label
-    ctx.fillStyle='#888';
-    ctx.font='10px Poppins,sans-serif';
-    ctx.textAlign='center';
-    ctx.fillText(d.label,x,H-8);
+    ctx.fillStyle='#888888'; ctx.font='10px Arial,sans-serif'; ctx.textAlign='center';
+    ctx.fillText(d.label, cx, H-8);
   });
 
-  // Y axis labels
-  ctx.fillStyle='#AAA'; ctx.font='10px Poppins,sans-serif'; ctx.textAlign='right';
-  for(let i=0;i<=4;i++){
-    const val=Math.round(maxRev/4*i);
-    const y=pad.t+chartH-(chartH/4*i)+4;
-    ctx.fillText(val>=1000?Math.round(val/1000)+'k':'₹'+val, pad.l-4, y);
-  }
-
   // Legend
-  ctx.fillStyle='rgba(21,101,192,0.85)';
-  ctx.fillRect(pad.l,H-26,10,10);
-  ctx.fillStyle='#555'; ctx.font='10px Poppins,sans-serif'; ctx.textAlign='left';
-  ctx.fillText('Revenue',pad.l+14,H-17);
-  ctx.fillStyle='rgba(255,180,0,0.9)';
-  ctx.fillRect(pad.l+80,H-26,10,10);
-  ctx.fillStyle='#555';
-  ctx.fillText('Orders',pad.l+94,H-17);
+  ctx.fillStyle='#1565C0';
+  ctx.fillRect(pad.l, H-28, 10, 10);
+  ctx.fillStyle='#444'; ctx.font='11px Arial,sans-serif'; ctx.textAlign='left';
+  ctx.fillText('Revenue', pad.l+14, H-20);
+
+  ctx.fillStyle='#FFB300';
+  ctx.fillRect(pad.l+90, H-28, 10, 10);
+  ctx.fillStyle='#444';
+  ctx.fillText('Orders', pad.l+104, H-20);
 }
 
-// Auto-refresh dashboard from sheet when tab becomes visible
+// ---- Auto-refresh from Google Sheet ----
+// 1. When user switches back to the app
 document.addEventListener('visibilitychange',()=>{
   if(!document.hidden && settings.sheetUrl){
     loadSharedDataFromSheet().then(()=>renderAll());
   }
 });
+// 2. Auto-refresh every 2 minutes while app is open
+setInterval(()=>{
+  if(!document.hidden && settings.sheetUrl){
+    loadSharedDataFromSheet().then(()=>renderAll());
+  }
+}, 2*60*1000);
+// 3. Redraw charts whenever dashboard tab is clicked
+function showView(name,btn){
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('view-'+name).classList.add('active');
+  if(btn)btn.classList.add('active');
+  if(name==='orders')renderOrders();
+  else if(name==='payments')renderPayments();
+  else if(name==='clients')renderClients();
+  else if(name==='dashboard'){
+    updateDashboard();
+    // Also pull fresh data from sheet
+    if(settings.sheetUrl) loadSharedDataFromSheet().then(()=>updateDashboard());
+  }
+  else if(name==='reports')renderReports();
+}
 
 // ========== ORDER CARD ==========
 function orderCardHTML(o){
@@ -2048,18 +2114,6 @@ function copyScript(){
 }
 
 // ========== UTILS ==========
-function showView(name,btn){
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-  document.getElementById('view-'+name).classList.add('active');
-  if(btn)btn.classList.add('active');
-  if(name==='orders')renderOrders();
-  if(name==='payments')renderPayments();
-  if(name==='clients'){
-    // Reload shared data before showing clients
-    loadSharedDataFromSheet().then(()=>renderAll());
-  }
-}
 function closeModal(id){document.getElementById(id).classList.remove('open');}
 function closeOnOverlay(e,id){if(e.target.id===id)closeModal(id);}
 
