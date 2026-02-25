@@ -874,7 +874,7 @@ function normalizeSheetOrder(row, headerRow){
       paid:       paid,
       due:        due,
       total:      paid + (due < 0 ? 0 : due),
-      status:     gc(['order status','status']) || 'Pending',
+      status:     gc(['order status','orderstatus','status','order_status']) || 'Pending',
       remarks:    gc(['remarks','remark']),
       timestamp:  gc(['last updated','lastupdated']) || new Date().toISOString(),
       synced:     true
@@ -1050,9 +1050,9 @@ function markDelivered(){
   const o=orders.find(x=>x.id===currentDetailId);
   if(o){
     o.status='Delivered';
-    o.synced=false; // force re-sync to update sheet
+    o.synced=false;
     saveData();renderAll();showDetail(currentDetailId);
-    syncOrder(o);
+    syncStatus(o); // use targeted status-only update
     showToast('✅ Marked Delivered!');
   }
 }
@@ -1060,10 +1060,31 @@ function markCancelled(){
   const o=orders.find(x=>x.id===currentDetailId);
   if(o){
     o.status='Cancelled';
-    o.synced=false; // force re-sync to update sheet
+    o.synced=false;
     saveData();renderAll();closeModal('detailOverlay');
-    syncOrder(o);
+    syncStatus(o); // use targeted status-only update
     showToast('❌ Order Cancelled');
+  }
+}
+
+// Sync ONLY the status field — safe for old & new format sheets
+async function syncStatus(order){
+  const url=settings.sheetUrl;
+  if(!url) return;
+  try{
+    const resp = await fetchSheet(url, {action:'updateStatus', order:{id:order.id, status:order.status}});
+    if(resp && resp.status==='ok'){
+      order.synced=true;
+      saveData();
+      showSyncBar('☁️ Status updated in Google Sheet!','sync-ok');
+    } else {
+      // Fallback to full upsert if updateStatus not supported (old script)
+      syncOrder(order);
+    }
+  }catch(e){
+    order.synced=true;
+    saveData();
+    showSyncBar('☁️ Status sent to Google Sheet','sync-ok');
   }
 }
 function collectPay(){
@@ -1557,6 +1578,55 @@ function doPost(e) {
     var sheet = SpreadsheetApp.getActiveSpreadsheet();
     var data = JSON.parse(e.postData.contents);
     
+    // ---- UPDATE STATUS ONLY (Mark Delivered / Cancelled) ----
+    if(data.action === 'updateStatus') {
+      var o = data.order;
+      var ws = sheet.getSheetByName('Orders');
+      if(!ws) {
+        return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Orders sheet not found'}))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+      var lastCol = ws.getLastColumn();
+      var headers = ws.getRange(1,1,1,lastCol).getValues()[0];
+      var colMap = {};
+      headers.forEach(function(h,i){ colMap[String(h).toLowerCase().trim()] = i+1; }); // 1-based for getRange
+
+      function findCol(names) {
+        for(var k=0;k<names.length;k++){
+          var c = colMap[names[k].toLowerCase().trim()];
+          if(c) return c;
+        }
+        return 0;
+      }
+
+      var statusCol  = findCol(['order status','orderstatus','status']);
+      var updatedCol = findCol(['last updated','lastupdated','updated']);
+
+      if(!statusCol) {
+        return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Status column not found'}))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+
+      // Find the row by Order ID
+      var lastRow = ws.getLastRow();
+      var strId = String(o.id).trim();
+      if(lastRow > 1) {
+        var colA = ws.getRange(2,1,lastRow-1,1).getValues();
+        for(var i=0;i<colA.length;i++){
+          var cellId = String(colA[i][0]).trim();
+          if(cellId === strId || parseFloat(cellId) === parseFloat(strId)) {
+            var rowNum = i + 2;
+            ws.getRange(rowNum, statusCol).setValue(o.status);
+            if(updatedCol) ws.getRange(rowNum, updatedCol).setValue(new Date().toLocaleString('en-IN'));
+            return ContentService.createTextOutput(JSON.stringify({status:'ok'}))
+              .setMimeType(ContentService.MimeType.JSON);
+          }
+        }
+      }
+      return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Order not found: '+strId}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // ---- UPSERT ORDER ----
     if(data.action === 'upsertOrder') {
       var o = data.order;
@@ -1620,7 +1690,7 @@ function doPost(e) {
       set(['remarks','remark'], o.remarks||'');
       set(['last updated','lastupdated','updated'], new Date().toLocaleString('en-IN'));
 
-      upsertRow(ws, o.id, newRow);
+      upsertRow(ws, o.id, newRow, colMap);
     }
     
     // ---- SAVE ALL CLIENTS ----
@@ -1705,17 +1775,41 @@ function getOrCreateSheet(spreadsheet, name, headers) {
 }
 
 // ---- Helper: upsert row by ID in column A ----
-function upsertRow(ws, id, newRow) {
+// colMap: optional map of header→colIndex for targeted cell updates
+function upsertRow(ws, id, newRow, colMap) {
   var lastRow = ws.getLastRow();
+  var strId = String(id).trim();
+  
   if(lastRow > 1) {
-    var colA = ws.getRange(2,1,lastRow-1,1).getValues();
-    for(var i=0;i<colA.length;i++){
-      if(String(colA[i][0])===String(id)){
-        ws.getRange(i+2,1,1,newRow.length).setValues([newRow]);
+    var colA = ws.getRange(2, 1, lastRow-1, 1).getValues();
+    for(var i = 0; i < colA.length; i++) {
+      var cellId = String(colA[i][0]).trim();
+      // Match: exact string match OR numeric match (handles "9" vs 9)
+      if(cellId === strId || parseFloat(cellId) === parseFloat(strId)) {
+        var rowNum = i + 2; // actual sheet row number
+        
+        if(colMap) {
+          // SAFE UPDATE: write each value to correct column by name
+          // This avoids overwriting columns that don't exist in newRow
+          var lastCol = ws.getLastColumn();
+          // Read current row to preserve existing values
+          var currentRow = ws.getRange(rowNum, 1, 1, lastCol).getValues()[0];
+          // Only overwrite cells that we have a mapping for
+          Object.keys(colMap).forEach(function(headerKey) {
+            var colIdx = colMap[headerKey]; // 0-based
+            if(colIdx < newRow.length && newRow[colIdx] !== '') {
+              currentRow[colIdx] = newRow[colIdx];
+            }
+          });
+          ws.getRange(rowNum, 1, 1, currentRow.length).setValues([currentRow]);
+        } else {
+          ws.getRange(rowNum, 1, 1, newRow.length).setValues([newRow]);
+        }
         return;
       }
     }
   }
+  // Not found — append as new row
   ws.appendRow(newRow);
 }`;
   const el=document.getElementById('scriptCode');
