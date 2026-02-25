@@ -1,7 +1,26 @@
-function normalizeSheetOrder(sheetData) {
-    return sheetData.filter(row => row[0] !== 'Order No.');
-}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maatarini Gas</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <script>
+      const normalizeSheetOrder = (data) => {
+          return data.filter(row => row[0] !== 'Order No.');
+      };
 
-function normalizeSheetClient(sheetData) {
-    return sheetData.filter(row => row[0] !== 'Client ID');
-}
+      const normalizeSheetClient = (data) => {
+          return data.filter(row => row[0] !== 'Client ID');
+      };
+
+      const loadSharedDataFromSheet = (data) => {
+          const orders = normalizeSheetOrder(data);
+          const clients = normalizeSheetClient(data);
+          return { orders, clients };
+      };
+    </script>
+</body>
+</html>
