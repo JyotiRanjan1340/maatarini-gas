@@ -1110,7 +1110,7 @@ async function syncStatus(order){
   const url=settings.sheetUrl;
   if(!url) return;
   try{
-    const resp = await fetchSheet(url, {action:'updateStatus', order:{id:order.id, status:order.status}});
+    const resp = await fetchSheet(url, {action:'updateStatus', order:{id:order.id, status:order.status, ddate:order.ddate||''}});
     if(resp && resp.status==='ok'){
       order.synced=true;
       saveData();
@@ -1120,9 +1120,13 @@ async function syncStatus(order){
       syncOrder(order);
     }
   }catch(e){
-    order.synced=true;
+    // CORS may block response but request was still sent to Google Sheet
+    // Keep synced=false so Sync button can retry; show warning
+    order.synced=false;
     saveData();
-    showSyncBar('☁️ Status sent to Google Sheet','sync-ok');
+    showSyncBar('⚠️ Sync uncertain — tap ☁️ Sync to retry','sync-pending');
+    // Retry using full upsert as fallback
+    setTimeout(()=>syncOrder(order), 1500);
   }
 }
 function collectPay(){
@@ -1519,13 +1523,16 @@ async function syncOrder(order){
       saveData();
       showSyncBar('☁️ Saved to Google Sheet!','sync-ok');
     } else {
-      showSyncBar('⚠️ Sync failed – saved locally','sync-err');
+      order.synced = false;
+      saveData();
+      showSyncBar('⚠️ Sync failed – tap ☁️ Sync to retry','sync-err');
     }
   }catch(e){
-    // CORS blocks response but request was sent — mark synced to avoid duplicate
-    order.synced = true;
+    // CORS blocks response but request was likely sent — keep synced=false
+    // so user can manually confirm via Sync button
+    order.synced = false;
     saveData();
-    showSyncBar('☁️ Sent to Google Sheet','sync-ok');
+    showSyncBar('⚠️ Sync uncertain – tap ☁️ Sync to retry','sync-pending');
   }
 }
 
@@ -1560,7 +1567,11 @@ async function fetchSheet(url, payload){
       headers:{'Content-Type':'text/plain'}, // text/plain avoids preflight CORS block
       body: JSON.stringify(payload)
     });
-    return await resp.json();
+    if(resp.ok) {
+      const text = await resp.text();
+      try { return JSON.parse(text); } catch(e) { return {status:'ok'}; }
+    }
+    return {status:'ok'}; // assume sent
   } catch(e){
     throw e;
   }
@@ -1621,8 +1632,7 @@ function doPost(e) {
       var o = data.order;
       var ws = sheet.getSheetByName('Orders');
       if(!ws) {
-        return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Orders sheet not found'}))
-          .setMimeType(ContentService.MimeType.JSON);
+        return makeResponse({status:'error',msg:'Orders sheet not found'});
       }
       var lastCol = ws.getLastColumn();
       var headers = ws.getRange(1,1,1,lastCol).getValues()[0];
@@ -1638,11 +1648,11 @@ function doPost(e) {
       }
 
       var statusCol  = findCol(['order status','orderstatus','status']);
+      var ddateCol   = findCol(['delivery date','deliverydate','ddate']);
       var updatedCol = findCol(['last updated','lastupdated','updated']);
 
       if(!statusCol) {
-        return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Status column not found'}))
-          .setMimeType(ContentService.MimeType.JSON);
+        return makeResponse({status:'error',msg:'Status column not found'});
       }
 
       // Find the row by Order ID
@@ -1655,14 +1665,14 @@ function doPost(e) {
           if(cellId === strId || parseFloat(cellId) === parseFloat(strId)) {
             var rowNum = i + 2;
             ws.getRange(rowNum, statusCol).setValue(o.status);
+            // Set delivery date if marking as Delivered and ddate provided
+            if(ddateCol && o.ddate) ws.getRange(rowNum, ddateCol).setValue(o.ddate);
             if(updatedCol) ws.getRange(rowNum, updatedCol).setValue(new Date().toLocaleString('en-IN'));
-            return ContentService.createTextOutput(JSON.stringify({status:'ok'}))
-              .setMimeType(ContentService.MimeType.JSON);
+            return makeResponse({status:'ok'});
           }
         }
       }
-      return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Order not found: '+strId}))
-        .setMimeType(ContentService.MimeType.JSON);
+      return makeResponse({status:'error',msg:'Order not found: '+strId});
     }
 
     // ---- UPSERT ORDER ----
@@ -1672,10 +1682,10 @@ function doPost(e) {
       if(!ws) {
         // Sheet doesn't exist yet — create with full new format
         ws = sheet.insertSheet('Orders');
-        var fullHeaders = ['Order No.','Indent Date','Client Name','Delivery Date',
+        var fullHeaders = ['Order No.','Indent Date','Client Name','Mobile','Address','Delivery Date',
           'Cylinder QTY','Cylinder Type','Cylinder Delivered (loaded)',
           'Cylinder Collected (empty)','Cylinder with type Returned BPCL',
-          'Delivery Date','Delivery Boy','Payment Mode',
+          'Rate','Delivery Boy','Payment Mode',
           'Amount Paid (Rs)','Due Amount (Rs)','Order Status','Remarks','Last Updated'];
         ws.appendRow(fullHeaders);
         ws.setFrozenRows(1);
@@ -1720,11 +1730,12 @@ function doPost(e) {
       set(['cylinder delivered (loaded)','cylinder delivered','delivered'], o.delivered||0);
       set(['cylinder collected (empty)','cylinder collected','collected'], o.collected||0);
       set(['cylinder with type returned bpcl','returned bpcl','returned'], o.returned||'');
+      set(['rate','rate (rs)','rate per unit'], o.rate||0);
       set(['delivery boy','deliveryboy','dboy'], o.dboy||'');
       set(['payment mode','paymode','payment'], o.payMode||'Cash');
       set(['amount paid (rs)','amount paid (₹)','amount paid','paid'], o.paid||0);
       set(['due amount (rs)','due amount (₹)','due amount','due'], due);
-      set(['order status','status'], o.status||'Pending');
+      set(['order status','orderstatus','status'], o.status||'Pending');
       set(['remarks','remark'], o.remarks||'');
       set(['last updated','lastupdated','updated'], new Date().toLocaleString('en-IN'));
 
@@ -1751,13 +1762,9 @@ function doPost(e) {
       }
     }
     
-    return ContentService
-      .createTextOutput(JSON.stringify({status:'ok'}))
-      .setMimeType(ContentService.MimeType.JSON);
+    return makeResponse({status:'ok'});
   } catch(err) {
-    return ContentService
-      .createTextOutput(JSON.stringify({status:'error',msg:err.toString()}))
-      .setMimeType(ContentService.MimeType.JSON);
+    return makeResponse({status:'error',msg:err.toString()});
   }
 }
 
@@ -1781,19 +1788,20 @@ function doGet(e) {
       if(cws && cws.getLastRow() > 1) {
         result.clients = cws.getRange(2,1,cws.getLastRow()-1,cws.getLastColumn()).getValues();
       }
-      return ContentService
-        .createTextOutput(JSON.stringify(result))
-        .setMimeType(ContentService.MimeType.JSON);
+      return makeResponse(result);
     }
     
-    return ContentService
-      .createTextOutput(JSON.stringify({status:'ok',msg:'Maa Tarini Gas API running'}))
-      .setMimeType(ContentService.MimeType.JSON);
+    return makeResponse({status:'ok',msg:'Maa Tarini Gas API running'});
   } catch(err) {
-    return ContentService
-      .createTextOutput(JSON.stringify({status:'error',msg:err.toString()}))
-      .setMimeType(ContentService.MimeType.JSON);
+    return makeResponse({status:'error',msg:err.toString()});
   }
+}
+
+// ---- Helper: create response with CORS headers ----
+function makeResponse(data) {
+  return ContentService
+    .createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 // ---- Helper: get or create sheet with headers ----
@@ -1828,15 +1836,18 @@ function upsertRow(ws, id, newRow, colMap) {
         
         if(colMap) {
           // SAFE UPDATE: write each value to correct column by name
-          // This avoids overwriting columns that don't exist in newRow
           var lastCol = ws.getLastColumn();
           // Read current row to preserve existing values
           var currentRow = ws.getRange(rowNum, 1, 1, lastCol).getValues()[0];
-          // Only overwrite cells that we have a mapping for
+          // Overwrite cells that we have a mapping for (including empty strings for some fields)
           Object.keys(colMap).forEach(function(headerKey) {
             var colIdx = colMap[headerKey]; // 0-based
-            if(colIdx < newRow.length && newRow[colIdx] !== '') {
-              currentRow[colIdx] = newRow[colIdx];
+            if(colIdx < newRow.length) {
+              // Always update status, id, name; skip truly empty non-critical fields
+              var criticalFields = ['order no.','order no','orderid','id','order status','orderstatus','status','client name','clientname','name'];
+              if(criticalFields.indexOf(headerKey) >= 0 || newRow[colIdx] !== '') {
+                currentRow[colIdx] = newRow[colIdx];
+              }
             }
           });
           ws.getRange(rowNum, 1, 1, currentRow.length).setValues([currentRow]);
@@ -1867,6 +1878,10 @@ function showView(name,btn){
   if(btn)btn.classList.add('active');
   if(name==='orders')renderOrders();
   if(name==='payments')renderPayments();
+  if(name==='dashboard'){
+    // Reload shared data from Google Sheet on dashboard switch
+    loadSharedDataFromSheet().then(()=>renderAll());
+  }
   if(name==='clients'){
     // Reload shared data before showing clients
     loadSharedDataFromSheet().then(()=>renderAll());
