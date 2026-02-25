@@ -686,8 +686,15 @@ body{font-family:'Poppins',sans-serif;background:#FFFDF0;color:var(--text);min-h
 
 <script>
 // ========== DATA ==========
-let orders  = JSON.parse(localStorage.getItem('mtg_orders')  || '[]');
-let clients = JSON.parse(localStorage.getItem('mtg_clients') || '[]');
+const _skipIds   = ['order no.','order no','orderid','id','order','#'];
+const _skipNames = ['client name','clientname','name','client','customer name'];
+let orders  = JSON.parse(localStorage.getItem('mtg_orders')  || '[]')
+              .filter(o => o.id && o.name &&
+                           !_skipIds.includes(String(o.id).toLowerCase().trim()) &&
+                           !_skipNames.includes(String(o.name).toLowerCase().trim()));
+let clients = JSON.parse(localStorage.getItem('mtg_clients') || '[]')
+              .filter(c => c.name &&
+                           !_skipNames.includes(String(c.name).toLowerCase().trim()));
 let settings= JSON.parse(localStorage.getItem('mtg_settings')|| '{"editHours":10,"sheetUrl":"","agency":"M/S MAA TARINI BHARAT GAS AGENCY","pin":"1234"}');
 
 let currentFilter = 'all';
@@ -737,19 +744,24 @@ async function loadSharedDataFromSheet(){
 
       // ---- Load Orders ----
       if(json.orders && json.orders.length){
-        // First row might be the header (sent from Apps Script) or a data row
-        // Check if Apps Script sent headers separately
         const headerRow = json.orderHeaders || null;
 
-        // Skip any row where col[0] matches known header values
-        const skipIds = ['order no.','order no','orderid','id','order'];
+        // Skip ANY row that looks like a header — check both col[0] and col[2]
+        const skipIds   = ['order no.','order no','orderid','id','order','#'];
+        const skipNames = ['client name','clientname','name','client','customer name'];
         const rawOrders = json.orders.filter(row => {
           const firstCell = String(row[0]||'').trim().toLowerCase();
-          return firstCell && !skipIds.includes(firstCell);
+          const nameCell  = String(row[2]||'').trim().toLowerCase();
+          if(!firstCell) return false;
+          if(skipIds.includes(firstCell))   return false;
+          if(skipNames.includes(nameCell))  return false;
+          return true;
         });
-        // Pass header row so normalizeSheetOrder can map by column name
         orders = rawOrders.map(row => normalizeSheetOrder(row, headerRow))
-                          .filter(o=>o.id&&o.name&&o.id.toString().trim()!=='');
+                          .filter(o => o.id && o.name &&
+                                       String(o.id).trim() !== '' &&
+                                       !skipIds.includes(String(o.id).toLowerCase().trim()) &&
+                                       !skipNames.includes(String(o.name).toLowerCase().trim()));
         localStorage.setItem('mtg_orders', JSON.stringify(orders));
       }
 
@@ -2126,17 +2138,24 @@ init();
 </script>
 <!-- ===== PWA: Service Worker + Install Prompt ===== -->
 <script>
-// ---- Register Service Worker ----
+// ---- Register Service Worker (only when deployed, not in Claude preview) ----
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js')
-      .then(reg => {
-        console.log('[PWA] Service Worker registered:', reg.scope);
-        // Check for updates every 60 seconds
-        setInterval(() => reg.update(), 60000);
-      })
-      .catch(err => console.log('[PWA] SW registration failed:', err));
-  });
+  const isClaudePreview = location.hostname.includes('claudeusercontent.com') ||
+                          location.hostname.includes('claude.ai') ||
+                          location.protocol === 'blob:' ||
+                          location.protocol === 'data:';
+  if (!isClaudePreview) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js')
+        .then(reg => {
+          console.log('[PWA] Service Worker registered:', reg.scope);
+          setInterval(() => reg.update(), 60000);
+        })
+        .catch(err => console.log('[PWA] SW registration failed:', err));
+    });
+  } else {
+    console.log('[PWA] Running in preview — Service Worker skipped (works after deployment)');
+  }
 }
 
 // ---- Install Banner ----
