@@ -893,8 +893,8 @@ function normalizeSheetOrder(row, headerRow){
       return '';
     }
     function gn(names) { return parseFloat(gc(names))||0; }
-    var paid = gn(['amount paid (rs)','amount paid (₹)','amount paid']);
-    var due  = gn(['due amount (rs)','due amount (₹)','due amount']);
+    var paidAmt = gn(['amount paid (rs)','amount paid (₹)','amount paid']);
+    var dueAmt  = gn(['due amount (rs)','due amount (₹)','due amount']);
     return {
       id:         gc(['order no.','order no','orderid']),
       indentDate: gc(['indent date','indentdate']),
@@ -909,9 +909,9 @@ function normalizeSheetOrder(row, headerRow){
       returned:   gc(['cylinder with type returned bpcl','returned bpcl','returned']),
       dboy:       gc(['delivery boy','deliveryboy']),
       payMode:    gc(['payment mode','paymode']) || 'Cash',
-      paid:       paid,
-      due:        due,
-      total:      paid + (due < 0 ? 0 : due),
+      paid:       paidAmt,
+      due:        dueAmt,
+      total:      paidAmt + (dueAmt < 0 ? 0 : dueAmt),
       status:     gc(['order status','orderstatus','status','order_status']) || 'Pending',
       remarks:    gc(['remarks','remark']),
       timestamp:  gc(['last updated','lastupdated']) || new Date().toISOString(),
@@ -1089,9 +1089,39 @@ function markDelivered(){
   if(o){
     o.status='Delivered';
     o.synced=false;
-    saveData();renderAll();showDetail(currentDetailId);
-    syncStatus(o); // use targeted status-only update
+    if(!o.ddate) o.ddate=new Date().toISOString().split('T')[0];
+    saveData();
+    renderAll();
+    closeModal('detailOverlay');
     showToast('✅ Marked Delivered!');
+    syncDelivered(o);
+  }
+}
+async function syncDelivered(order){
+  const url=settings.sheetUrl;
+  if(!url){ showSyncBar('⚠️ No Sheet URL set','sync-err'); return; }
+  try{
+    const resp = await fetchSheet(url, {action:'updateStatus', order:{id:order.id, status:order.status, ddate:order.ddate||''}});
+    if(resp && resp.status==='ok'){
+      order.synced=true;
+      saveData();
+      showSyncBar('☁️ Delivered — updated in Google Sheet!','sync-ok');
+      return;
+    }
+    const resp2 = await fetchSheet(url, {action:'upsertOrder', order});
+    if(resp2 && resp2.status==='ok'){
+      order.synced=true;
+      saveData();
+      showSyncBar('☁️ Delivered — saved to Google Sheet!','sync-ok');
+    } else {
+      order.synced=false;
+      saveData();
+      showSyncBar('⚠️ Sync failed — tap ☁️ Sync to retry','sync-err');
+    }
+  }catch(e){
+    order.synced=false;
+    saveData();
+    showSyncBar('⚠️ Network error — tap ☁️ Sync to retry','sync-pending');
   }
 }
 function markCancelled(){
@@ -1544,19 +1574,26 @@ async function syncAllPending(){
   if(!pending.length){showToast('✅ All orders already synced!');return;}
   isSyncing=true;
   showSyncBar('⏳ Syncing '+pending.length+' orders...','sync-pending');
-  let success=0;
+  let success=0,failed=0;
   for(const o of pending){
     try{
       const resp = await fetchSheet(url,{action:'upsertOrder',order:o});
-      // Mark synced whether or not we get response (server deduplicates by Order ID)
-      o.synced=true; success++;
+      if(resp && resp.status==='ok'){
+        o.synced=true; success++;
+      } else {
+        failed++;
+      }
     }catch(e){
-      o.synced=true; success++; // assume sent, server will dedup
+      failed++;
     }
   }
   isSyncing=false;
   saveData();renderAll();
-  showSyncBar(`☁️ Synced ${success}/${pending.length} orders!`,'sync-ok');
+  if(failed>0){
+    showSyncBar(`⚠️ ${success} synced, ${failed} failed — retry again`,'sync-err');
+  } else {
+    showSyncBar(`☁️ All ${success} orders synced to Google Sheet!`,'sync-ok');
+  }
 }
 
 // Fetch wrapper — tries with CORS, falls back gracefully
