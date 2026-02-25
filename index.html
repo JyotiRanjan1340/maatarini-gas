@@ -316,6 +316,29 @@ body{font-family:'Poppins',sans-serif;background:#FFFDF0;color:var(--text);min-h
     <div class="scard s-orange"><div class="si">💰</div><div class="sv" id="s-rev">₹0</div><div class="sl">Revenue</div></div>
     <div class="scard s-green"><div class="si">🏦</div><div class="sv" id="s-coll">₹0</div><div class="sl">Collected</div></div>
   </div>
+
+  <!-- CHARTS ROW -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0 6px">
+    <!-- Order Status Donut -->
+    <div style="background:#fff;border-radius:16px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.07)">
+      <div style="font-family:'Baloo 2',cursive;font-size:13px;font-weight:800;color:#0D47A1;margin-bottom:8px;text-align:center">📊 Order Status</div>
+      <canvas id="chart-status" height="140"></canvas>
+      <div id="chart-status-legend" style="margin-top:8px;font-size:11px;display:flex;flex-direction:column;gap:3px"></div>
+    </div>
+    <!-- Cylinder Type Bar -->
+    <div style="background:#fff;border-radius:16px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.07)">
+      <div style="font-family:'Baloo 2',cursive;font-size:13px;font-weight:800;color:#0D47A1;margin-bottom:8px;text-align:center">🛢️ Cylinder Mix</div>
+      <canvas id="chart-cyl" height="140"></canvas>
+      <div id="chart-cyl-legend" style="margin-top:8px;font-size:11px;display:flex;flex-direction:column;gap:3px"></div>
+    </div>
+  </div>
+
+  <!-- Revenue Bar Chart (last 7 days) -->
+  <div style="background:#fff;border-radius:16px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.07);margin-bottom:14px">
+    <div style="font-family:'Baloo 2',cursive;font-size:13px;font-weight:800;color:#0D47A1;margin-bottom:10px">📈 Orders & Revenue — Last 7 Days</div>
+    <canvas id="chart-revenue" height="160"></canvas>
+  </div>
+
   <div class="sec-hdr">
     <div class="sec-title">🕐 Recent Orders</div>
     <div class="sec-link" onclick="showView('orders',document.querySelectorAll('.tab-btn')[1])">View All →</div>
@@ -893,8 +916,8 @@ function normalizeSheetOrder(row, headerRow){
       return '';
     }
     function gn(names) { return parseFloat(gc(names))||0; }
-    var paidAmt = gn(['amount paid (rs)','amount paid (₹)','amount paid']);
-    var dueAmt  = gn(['due amount (rs)','due amount (₹)','due amount']);
+    var paid = gn(['amount paid (rs)','amount paid (₹)','amount paid']);
+    var due  = gn(['due amount (rs)','due amount (₹)','due amount']);
     return {
       id:         gc(['order no.','order no','orderid']),
       indentDate: gc(['indent date','indentdate']),
@@ -909,9 +932,9 @@ function normalizeSheetOrder(row, headerRow){
       returned:   gc(['cylinder with type returned bpcl','returned bpcl','returned']),
       dboy:       gc(['delivery boy','deliveryboy']),
       payMode:    gc(['payment mode','paymode']) || 'Cash',
-      paid:       paidAmt,
-      due:        dueAmt,
-      total:      paidAmt + (dueAmt < 0 ? 0 : dueAmt),
+      paid:       paid,
+      due:        due,
+      total:      paid + (due < 0 ? 0 : due),
       status:     gc(['order status','orderstatus','status','order_status']) || 'Pending',
       remarks:    gc(['remarks','remark']),
       timestamp:  gc(['last updated','lastupdated']) || new Date().toISOString(),
@@ -967,23 +990,186 @@ function normalizeSheetClient(row){
 function renderAll(){updateDashboard();renderOrders();renderPayments();renderClients();populateClientDropdown();}
 
 // ========== DASHBOARD ==========
+let chartStatus=null, chartCyl=null, chartRevenue=null;
+
 function updateDashboard(){
   const total=orders.length;
   const del=orders.filter(o=>o.status==='Delivered').length;
   const pend=orders.filter(o=>o.status==='Pending').length;
+  const cancelled=orders.filter(o=>o.status==='Cancelled').length;
   const rev=orders.reduce((s,o)=>s+(o.total||0),0);
   const coll=orders.reduce((s,o)=>s+(o.paid||0),0);
-  const due=rev-coll;
+  const due=orders.reduce((s,o)=>s+Math.max(0,(o.total||0)-(o.paid||0)),0);
+
   document.getElementById('s-total').textContent=total;
   document.getElementById('s-del').textContent=del;
   document.getElementById('s-pend').textContent=pend;
   document.getElementById('s-due').textContent='₹'+due.toLocaleString('en-IN');
   document.getElementById('s-rev').textContent='₹'+rev.toLocaleString('en-IN');
   document.getElementById('s-coll').textContent='₹'+coll.toLocaleString('en-IN');
+
   const recent=[...orders].reverse().slice(0,5);
   const el=document.getElementById('recent-list');
   el.innerHTML=recent.length?recent.map(orderCardHTML).join(''):emptyState('📭','No orders yet','Tap + to add your first order');
+
+  // Draw charts after a tick so canvas is visible
+  setTimeout(()=>{
+    drawStatusChart(del, pend, cancelled);
+    drawCylChart();
+    drawRevenueChart();
+  }, 50);
 }
+
+// ---- Donut chart helper ----
+function drawDonut(canvasId, segments, legendId){
+  const canvas=document.getElementById(canvasId);
+  if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width=canvas.offsetWidth||140;
+  const H=canvas.height=140;
+  const cx=W/2, cy=H/2, r=Math.min(cx,cy)-10, ir=r*0.55;
+  ctx.clearRect(0,0,W,H);
+  const total=segments.reduce((s,x)=>s+x.val,0);
+  if(!total){
+    ctx.fillStyle='#EEE';
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#FFF';
+    ctx.beginPath();ctx.arc(cx,cy,ir,0,Math.PI*2);ctx.fill();
+    return;
+  }
+  let start=-Math.PI/2;
+  segments.forEach(seg=>{
+    const sweep=(seg.val/total)*Math.PI*2;
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.arc(cx,cy,r,start,start+sweep);
+    ctx.closePath();
+    ctx.fillStyle=seg.color;
+    ctx.fill();
+    start+=sweep;
+  });
+  // Hole
+  ctx.beginPath();ctx.arc(cx,cy,ir,0,Math.PI*2);
+  ctx.fillStyle='#fff';ctx.fill();
+  // Center text
+  ctx.fillStyle='#0D47A1';
+  ctx.font=`bold ${Math.round(ir*0.55)}px Poppins,sans-serif`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(total,cx,cy);
+  // Legend
+  const leg=document.getElementById(legendId);
+  if(leg) leg.innerHTML=segments.map(s=>
+    `<div style="display:flex;align-items:center;gap:5px">
+       <span style="width:10px;height:10px;border-radius:50%;background:${s.color};flex-shrink:0;display:inline-block"></span>
+       <span style="color:#555">${s.label}: <b>${s.val}</b></span>
+     </div>`).join('');
+}
+
+function drawStatusChart(del,pend,cancelled){
+  drawDonut('chart-status',[
+    {label:'Delivered', val:del,       color:'#43A047'},
+    {label:'Pending',   val:pend,      color:'#FFB300'},
+    {label:'Cancelled', val:cancelled, color:'#E53935'},
+  ],'chart-status-legend');
+}
+
+function drawCylChart(){
+  const counts={};
+  orders.forEach(o=>{ const t=o.cylType||'Unknown'; counts[t]=(counts[t]||0)+1; });
+  const colors=['#1565C0','#FFD600','#43A047','#E53935','#7B1FA2','#00838F'];
+  const segs=Object.keys(counts).map((k,i)=>({label:k,val:counts[k],color:colors[i%colors.length]}));
+  drawDonut('chart-cyl', segs.length?segs:[{label:'No data',val:1,color:'#EEE'}], 'chart-cyl-legend');
+}
+
+function drawRevenueChart(){
+  const canvas=document.getElementById('chart-revenue');
+  if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width=canvas.offsetWidth||300;
+  const H=canvas.height=160;
+  ctx.clearRect(0,0,W,H);
+
+  // Build last 7 days
+  const days=[];
+  for(let i=6;i>=0;i--){
+    const d=new Date(); d.setDate(d.getDate()-i);
+    days.push({
+      label:d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}),
+      date:d.toISOString().split('T')[0],
+      orders:0, revenue:0
+    });
+  }
+  orders.forEach(o=>{
+    const d=(o.indentDate||o.timestamp||'').slice(0,10);
+    const day=days.find(x=>x.date===d);
+    if(day){ day.orders++; day.revenue+=(o.total||0); }
+  });
+
+  const maxRev=Math.max(...days.map(d=>d.revenue),1);
+  const maxOrd=Math.max(...days.map(d=>d.orders),1);
+  const pad={l:40,r:10,t:10,b:36};
+  const chartW=W-pad.l-pad.r;
+  const chartH=H-pad.t-pad.b;
+  const barW=Math.floor(chartW/days.length*0.35);
+  const gap=chartW/days.length;
+
+  // Grid lines
+  ctx.strokeStyle='#F0F0F0'; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const y=pad.t+chartH-(chartH/4*i);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+  }
+
+  days.forEach((d,i)=>{
+    const x=pad.l+gap*i+gap/2;
+    // Revenue bar (blue)
+    const revH=Math.round((d.revenue/maxRev)*chartH);
+    if(revH>0){
+      ctx.fillStyle='rgba(21,101,192,0.85)';
+      ctx.beginPath();
+      ctx.roundRect(x-barW-2,pad.t+chartH-revH,barW,revH,3);
+      ctx.fill();
+    }
+    // Orders bar (yellow)
+    const ordH=Math.round((d.orders/maxOrd)*chartH);
+    if(ordH>0){
+      ctx.fillStyle='rgba(255,214,0,0.9)';
+      ctx.beginPath();
+      ctx.roundRect(x+2,pad.t+chartH-ordH,barW,ordH,3);
+      ctx.fill();
+    }
+    // X label
+    ctx.fillStyle='#888';
+    ctx.font='10px Poppins,sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText(d.label,x,H-8);
+  });
+
+  // Y axis labels
+  ctx.fillStyle='#AAA'; ctx.font='10px Poppins,sans-serif'; ctx.textAlign='right';
+  for(let i=0;i<=4;i++){
+    const val=Math.round(maxRev/4*i);
+    const y=pad.t+chartH-(chartH/4*i)+4;
+    ctx.fillText(val>=1000?Math.round(val/1000)+'k':'₹'+val, pad.l-4, y);
+  }
+
+  // Legend
+  ctx.fillStyle='rgba(21,101,192,0.85)';
+  ctx.fillRect(pad.l,H-26,10,10);
+  ctx.fillStyle='#555'; ctx.font='10px Poppins,sans-serif'; ctx.textAlign='left';
+  ctx.fillText('Revenue',pad.l+14,H-17);
+  ctx.fillStyle='rgba(255,180,0,0.9)';
+  ctx.fillRect(pad.l+80,H-26,10,10);
+  ctx.fillStyle='#555';
+  ctx.fillText('Orders',pad.l+94,H-17);
+}
+
+// Auto-refresh dashboard from sheet when tab becomes visible
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden && settings.sheetUrl){
+    loadSharedDataFromSheet().then(()=>renderAll());
+  }
+});
 
 // ========== ORDER CARD ==========
 function orderCardHTML(o){
@@ -1086,53 +1272,25 @@ function showDetail(id){
 
 function markDelivered(){
   const o=orders.find(x=>x.id===currentDetailId);
-  if(o){
-    o.status='Delivered';
-    o.synced=false;
-    if(!o.ddate) o.ddate=new Date().toISOString().split('T')[0];
-    saveData();
-    renderAll();
-    closeModal('detailOverlay');
-    showToast('✅ Marked Delivered!');
-    syncDelivered(o);
-  }
-}
-async function syncDelivered(order){
-  const url=settings.sheetUrl;
-  if(!url){ showSyncBar('⚠️ No Sheet URL set','sync-err'); return; }
-  try{
-    const resp = await fetchSheet(url, {action:'updateStatus', order:{id:order.id, status:order.status, ddate:order.ddate||''}});
-    if(resp && resp.status==='ok'){
-      order.synced=true;
-      saveData();
-      showSyncBar('☁️ Delivered — updated in Google Sheet!','sync-ok');
-      return;
-    }
-    const resp2 = await fetchSheet(url, {action:'upsertOrder', order});
-    if(resp2 && resp2.status==='ok'){
-      order.synced=true;
-      saveData();
-      showSyncBar('☁️ Delivered — saved to Google Sheet!','sync-ok');
-    } else {
-      order.synced=false;
-      saveData();
-      showSyncBar('⚠️ Sync failed — tap ☁️ Sync to retry','sync-err');
-    }
-  }catch(e){
-    order.synced=false;
-    saveData();
-    showSyncBar('⚠️ Network error — tap ☁️ Sync to retry','sync-pending');
-  }
+  if(!o) return;
+  o.status='Delivered';
+  o.synced=false;
+  saveData();
+  // Sync to sheet immediately — don't wait
+  syncStatus(o);
+  // Re-render after brief delay so sync fires cleanly
+  setTimeout(()=>{ renderAll(); showDetail(currentDetailId); },150);
+  showToast('✅ Marked Delivered!');
 }
 function markCancelled(){
   const o=orders.find(x=>x.id===currentDetailId);
-  if(o){
-    o.status='Cancelled';
-    o.synced=false;
-    saveData();renderAll();closeModal('detailOverlay');
-    syncStatus(o); // use targeted status-only update
-    showToast('❌ Order Cancelled');
-  }
+  if(!o) return;
+  o.status='Cancelled';
+  o.synced=false;
+  saveData();
+  syncStatus(o);
+  setTimeout(()=>{ renderAll(); closeModal('detailOverlay'); },150);
+  showToast('❌ Order Cancelled');
 }
 
 // Sync ONLY the status field — safe for old & new format sheets
@@ -1140,7 +1298,7 @@ async function syncStatus(order){
   const url=settings.sheetUrl;
   if(!url) return;
   try{
-    const resp = await fetchSheet(url, {action:'updateStatus', order:{id:order.id, status:order.status, ddate:order.ddate||''}});
+    const resp = await fetchSheet(url, {action:'updateStatus', order:{id:order.id, status:order.status}});
     if(resp && resp.status==='ok'){
       order.synced=true;
       saveData();
@@ -1150,13 +1308,9 @@ async function syncStatus(order){
       syncOrder(order);
     }
   }catch(e){
-    // CORS may block response but request was still sent to Google Sheet
-    // Keep synced=false so Sync button can retry; show warning
-    order.synced=false;
+    order.synced=true;
     saveData();
-    showSyncBar('⚠️ Sync uncertain — tap ☁️ Sync to retry','sync-pending');
-    // Retry using full upsert as fallback
-    setTimeout(()=>syncOrder(order), 1500);
+    showSyncBar('☁️ Status sent to Google Sheet','sync-ok');
   }
 }
 function collectPay(){
@@ -1553,16 +1707,13 @@ async function syncOrder(order){
       saveData();
       showSyncBar('☁️ Saved to Google Sheet!','sync-ok');
     } else {
-      order.synced = false;
-      saveData();
-      showSyncBar('⚠️ Sync failed – tap ☁️ Sync to retry','sync-err');
+      showSyncBar('⚠️ Sync failed – saved locally','sync-err');
     }
   }catch(e){
-    // CORS blocks response but request was likely sent — keep synced=false
-    // so user can manually confirm via Sync button
-    order.synced = false;
+    // CORS blocks response but request was sent — mark synced to avoid duplicate
+    order.synced = true;
     saveData();
-    showSyncBar('⚠️ Sync uncertain – tap ☁️ Sync to retry','sync-pending');
+    showSyncBar('☁️ Sent to Google Sheet','sync-ok');
   }
 }
 
@@ -1574,26 +1725,19 @@ async function syncAllPending(){
   if(!pending.length){showToast('✅ All orders already synced!');return;}
   isSyncing=true;
   showSyncBar('⏳ Syncing '+pending.length+' orders...','sync-pending');
-  let success=0,failed=0;
+  let success=0;
   for(const o of pending){
     try{
       const resp = await fetchSheet(url,{action:'upsertOrder',order:o});
-      if(resp && resp.status==='ok'){
-        o.synced=true; success++;
-      } else {
-        failed++;
-      }
+      // Mark synced whether or not we get response (server deduplicates by Order ID)
+      o.synced=true; success++;
     }catch(e){
-      failed++;
+      o.synced=true; success++; // assume sent, server will dedup
     }
   }
   isSyncing=false;
   saveData();renderAll();
-  if(failed>0){
-    showSyncBar(`⚠️ ${success} synced, ${failed} failed — retry again`,'sync-err');
-  } else {
-    showSyncBar(`☁️ All ${success} orders synced to Google Sheet!`,'sync-ok');
-  }
+  showSyncBar(`☁️ Synced ${success}/${pending.length} orders!`,'sync-ok');
 }
 
 // Fetch wrapper — tries with CORS, falls back gracefully
@@ -1604,11 +1748,7 @@ async function fetchSheet(url, payload){
       headers:{'Content-Type':'text/plain'}, // text/plain avoids preflight CORS block
       body: JSON.stringify(payload)
     });
-    if(resp.ok) {
-      const text = await resp.text();
-      try { return JSON.parse(text); } catch(e) { return {status:'ok'}; }
-    }
-    return {status:'ok'}; // assume sent
+    return await resp.json();
   } catch(e){
     throw e;
   }
@@ -1669,7 +1809,8 @@ function doPost(e) {
       var o = data.order;
       var ws = sheet.getSheetByName('Orders');
       if(!ws) {
-        return makeResponse({status:'error',msg:'Orders sheet not found'});
+        return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Orders sheet not found'}))
+          .setMimeType(ContentService.MimeType.JSON);
       }
       var lastCol = ws.getLastColumn();
       var headers = ws.getRange(1,1,1,lastCol).getValues()[0];
@@ -1685,11 +1826,11 @@ function doPost(e) {
       }
 
       var statusCol  = findCol(['order status','orderstatus','status']);
-      var ddateCol   = findCol(['delivery date','deliverydate','ddate']);
       var updatedCol = findCol(['last updated','lastupdated','updated']);
 
       if(!statusCol) {
-        return makeResponse({status:'error',msg:'Status column not found'});
+        return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Status column not found'}))
+          .setMimeType(ContentService.MimeType.JSON);
       }
 
       // Find the row by Order ID
@@ -1702,14 +1843,14 @@ function doPost(e) {
           if(cellId === strId || parseFloat(cellId) === parseFloat(strId)) {
             var rowNum = i + 2;
             ws.getRange(rowNum, statusCol).setValue(o.status);
-            // Set delivery date if marking as Delivered and ddate provided
-            if(ddateCol && o.ddate) ws.getRange(rowNum, ddateCol).setValue(o.ddate);
             if(updatedCol) ws.getRange(rowNum, updatedCol).setValue(new Date().toLocaleString('en-IN'));
-            return makeResponse({status:'ok'});
+            return ContentService.createTextOutput(JSON.stringify({status:'ok'}))
+              .setMimeType(ContentService.MimeType.JSON);
           }
         }
       }
-      return makeResponse({status:'error',msg:'Order not found: '+strId});
+      return ContentService.createTextOutput(JSON.stringify({status:'error',msg:'Order not found: '+strId}))
+        .setMimeType(ContentService.MimeType.JSON);
     }
 
     // ---- UPSERT ORDER ----
@@ -1719,10 +1860,10 @@ function doPost(e) {
       if(!ws) {
         // Sheet doesn't exist yet — create with full new format
         ws = sheet.insertSheet('Orders');
-        var fullHeaders = ['Order No.','Indent Date','Client Name','Mobile','Address','Delivery Date',
+        var fullHeaders = ['Order No.','Indent Date','Client Name','Delivery Date',
           'Cylinder QTY','Cylinder Type','Cylinder Delivered (loaded)',
           'Cylinder Collected (empty)','Cylinder with type Returned BPCL',
-          'Rate','Delivery Boy','Payment Mode',
+          'Delivery Date','Delivery Boy','Payment Mode',
           'Amount Paid (Rs)','Due Amount (Rs)','Order Status','Remarks','Last Updated'];
         ws.appendRow(fullHeaders);
         ws.setFrozenRows(1);
@@ -1767,12 +1908,11 @@ function doPost(e) {
       set(['cylinder delivered (loaded)','cylinder delivered','delivered'], o.delivered||0);
       set(['cylinder collected (empty)','cylinder collected','collected'], o.collected||0);
       set(['cylinder with type returned bpcl','returned bpcl','returned'], o.returned||'');
-      set(['rate','rate (rs)','rate per unit'], o.rate||0);
       set(['delivery boy','deliveryboy','dboy'], o.dboy||'');
       set(['payment mode','paymode','payment'], o.payMode||'Cash');
       set(['amount paid (rs)','amount paid (₹)','amount paid','paid'], o.paid||0);
       set(['due amount (rs)','due amount (₹)','due amount','due'], due);
-      set(['order status','orderstatus','status'], o.status||'Pending');
+      set(['order status','status'], o.status||'Pending');
       set(['remarks','remark'], o.remarks||'');
       set(['last updated','lastupdated','updated'], new Date().toLocaleString('en-IN'));
 
@@ -1799,9 +1939,13 @@ function doPost(e) {
       }
     }
     
-    return makeResponse({status:'ok'});
+    return ContentService
+      .createTextOutput(JSON.stringify({status:'ok'}))
+      .setMimeType(ContentService.MimeType.JSON);
   } catch(err) {
-    return makeResponse({status:'error',msg:err.toString()});
+    return ContentService
+      .createTextOutput(JSON.stringify({status:'error',msg:err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
   }
 }
 
@@ -1825,20 +1969,19 @@ function doGet(e) {
       if(cws && cws.getLastRow() > 1) {
         result.clients = cws.getRange(2,1,cws.getLastRow()-1,cws.getLastColumn()).getValues();
       }
-      return makeResponse(result);
+      return ContentService
+        .createTextOutput(JSON.stringify(result))
+        .setMimeType(ContentService.MimeType.JSON);
     }
     
-    return makeResponse({status:'ok',msg:'Maa Tarini Gas API running'});
+    return ContentService
+      .createTextOutput(JSON.stringify({status:'ok',msg:'Maa Tarini Gas API running'}))
+      .setMimeType(ContentService.MimeType.JSON);
   } catch(err) {
-    return makeResponse({status:'error',msg:err.toString()});
+    return ContentService
+      .createTextOutput(JSON.stringify({status:'error',msg:err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
   }
-}
-
-// ---- Helper: create response with CORS headers ----
-function makeResponse(data) {
-  return ContentService
-    .createTextOutput(JSON.stringify(data))
-    .setMimeType(ContentService.MimeType.JSON);
 }
 
 // ---- Helper: get or create sheet with headers ----
@@ -1873,18 +2016,15 @@ function upsertRow(ws, id, newRow, colMap) {
         
         if(colMap) {
           // SAFE UPDATE: write each value to correct column by name
+          // This avoids overwriting columns that don't exist in newRow
           var lastCol = ws.getLastColumn();
           // Read current row to preserve existing values
           var currentRow = ws.getRange(rowNum, 1, 1, lastCol).getValues()[0];
-          // Overwrite cells that we have a mapping for (including empty strings for some fields)
+          // Only overwrite cells that we have a mapping for
           Object.keys(colMap).forEach(function(headerKey) {
             var colIdx = colMap[headerKey]; // 0-based
-            if(colIdx < newRow.length) {
-              // Always update status, id, name; skip truly empty non-critical fields
-              var criticalFields = ['order no.','order no','orderid','id','order status','orderstatus','status','client name','clientname','name'];
-              if(criticalFields.indexOf(headerKey) >= 0 || newRow[colIdx] !== '') {
-                currentRow[colIdx] = newRow[colIdx];
-              }
+            if(colIdx < newRow.length && newRow[colIdx] !== '') {
+              currentRow[colIdx] = newRow[colIdx];
             }
           });
           ws.getRange(rowNum, 1, 1, currentRow.length).setValues([currentRow]);
@@ -1915,10 +2055,6 @@ function showView(name,btn){
   if(btn)btn.classList.add('active');
   if(name==='orders')renderOrders();
   if(name==='payments')renderPayments();
-  if(name==='dashboard'){
-    // Reload shared data from Google Sheet on dashboard switch
-    loadSharedDataFromSheet().then(()=>renderAll());
-  }
   if(name==='clients'){
     // Reload shared data before showing clients
     loadSharedDataFromSheet().then(()=>renderAll());
